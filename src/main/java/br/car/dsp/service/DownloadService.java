@@ -14,6 +14,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -26,12 +28,16 @@ import org.springframework.web.server.ResponseStatusException;
 @RequiredArgsConstructor
 public class DownloadService {
 
+	/** Formats the WFS can produce, and therefore the only ones with a fallback. */
+	private static final Set<String> WFS_BACKED_FORMATS = Set.of("csv");
+
 	private final DownloadConfigService downloadConfigService;
 	private final DownloadTerritoryFilterBuilder territoryFilterBuilder;
 	private final GeoServerWfsClient geoServerWfsClient;
 	private final DownloadFileNameBuilder downloadFileNameBuilder;
 	private final AreaOfInterestRepository areaOfInterestRepository;
 	private final FeaturesBundleZipBuilder featuresBundleZipBuilder;
+	private final PreGeneratedGeoFileService preGeneratedGeoFileService;
 
 	public List<DownloadThemeResponse> getThemes() {
 		return downloadConfigService.getEnabledThemes().stream()
@@ -76,11 +82,17 @@ public class DownloadService {
 					.toList();
 			String lastUpdate = null;
 			if (available) {
-				lastUpdate = geoServerWfsClient.fetchLatestAttributeValue(
-						wfsBaseUrl,
-						theme.typeName(),
-						cqlFilter
-				).orElse(null);
+				// The pre-generated file carries the date of the data it holds; the WFS answers
+				// the date of the data it has now. When both exist the file is what the citizen
+				// downloads, so its date is the honest one.
+				lastUpdate = firstFormat(theme)
+						.flatMap(format -> preGeneratedGeoFileService.findLastUpdate(
+								level2, level3, theme.code(), format))
+						.orElseGet(() -> geoServerWfsClient.fetchLatestAttributeValue(
+								wfsBaseUrl,
+								theme.typeName(),
+								cqlFilter
+						).orElse(null));
 			}
 			items.add(new DownloadItemResponse(
 					theme.code(),
@@ -111,25 +123,15 @@ public class DownloadService {
 			throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Format not supported for the theme");
 		}
 
-		String cqlFilter = territoryFilterBuilder.buildCqlFilter(
-				themeConfig,
+		// S3-first: the file was already generated from the same base the WFS reads, so serving
+		// it skips the heavy query. Only the formats the WFS can produce have a fallback.
+		byte[] content = preGeneratedGeoFileService.fetch(
 				level2.trim(),
-				normalizedLevel3
-		);
-		long matched = geoServerWfsClient.countFeatures(
-				downloadConfigService.resolveWfsBaseUrl(),
-				themeConfig.typeName(),
-				cqlFilter
-		);
-		if (matched <= 0) {
-			throw new ResponseStatusException(HttpStatus.NOT_FOUND, "File unavailable for download");
-		}
+				normalizedLevel3,
+				themeConfig.code(),
+				normalizedFormat
+		).orElseGet(() -> downloadFromWfs(themeConfig, level2.trim(), normalizedLevel3, normalizedFormat));
 
-		byte[] content = geoServerWfsClient.downloadCsv(
-				downloadConfigService.resolveWfsBaseUrl(),
-				themeConfig.typeName(),
-				cqlFilter
-		);
 		String fileName = downloadFileNameBuilder.build(
 				level2.trim(),
 				normalizedLevel3,
@@ -143,6 +145,34 @@ public class DownloadService {
 		headers.setContentLength(content.length);
 
 		return new ResponseEntity<>(content, headers, HttpStatus.OK);
+	}
+
+	/**
+	 * Fallback for what the object storage does not have. Only {@code csv} exists in the WFS:
+	 * any other format is served exclusively from the pre-generated file, so its absence is a
+	 * "not ready yet", not a broken request.
+	 */
+	private byte[] downloadFromWfs(DownloadThemeConfig themeConfig, String level2, String level3,
+			String format) {
+		if (!WFS_BACKED_FORMATS.contains(format)) {
+			throw new ResponseStatusException(HttpStatus.NOT_FOUND, "File unavailable for download");
+		}
+
+		String wfsBaseUrl = downloadConfigService.resolveWfsBaseUrl();
+		String cqlFilter = territoryFilterBuilder.buildCqlFilter(themeConfig, level2, level3);
+		long matched = geoServerWfsClient.countFeatures(wfsBaseUrl, themeConfig.typeName(), cqlFilter);
+		if (matched <= 0) {
+			throw new ResponseStatusException(HttpStatus.NOT_FOUND, "File unavailable for download");
+		}
+		return geoServerWfsClient.downloadCsv(wfsBaseUrl, themeConfig.typeName(), cqlFilter);
+	}
+
+	/** First format of the theme: enough to find the file whose date represents the theme. */
+	private static Optional<String> firstFormat(DownloadThemeConfig theme) {
+		List<String> formats = theme.formats();
+		return formats == null || formats.isEmpty()
+				? Optional.empty()
+				: Optional.of(formats.getFirst());
 	}
 
 	public ResponseEntity<byte[]> downloadFeaturesBundle(String aoiId) {

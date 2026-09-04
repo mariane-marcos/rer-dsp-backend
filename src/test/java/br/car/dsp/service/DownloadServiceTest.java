@@ -46,6 +46,9 @@ class DownloadServiceTest {
 	@Mock
 	private FeaturesBundleZipBuilder featuresBundleZipBuilder;
 
+	@Mock
+	private PreGeneratedGeoFileService preGeneratedGeoFileService;
+
 	@InjectMocks
 	private DownloadService downloadService;
 
@@ -217,6 +220,85 @@ class DownloadServiceTest {
 		);
 
 		assertEquals(HttpStatus.NOT_FOUND, exception.getStatusCode());
+	}
+
+	@Test
+	void downloadFile_ShouldServePreGeneratedFileWithoutTouchingTheWfs() {
+		when(downloadConfigService.findEnabledTheme("area_of_interest")).thenReturn(java.util.Optional.of(areaTheme));
+		when(preGeneratedGeoFileService.fetch("DF", null, "area_of_interest", "csv"))
+				.thenReturn(java.util.Optional.of("id,name\n1,pre-generated\n".getBytes()));
+		when(downloadFileNameBuilder.build("DF", null, "Area of interest", "csv"))
+				.thenReturn("area-of-interest_df.csv");
+
+		ResponseEntity<byte[]> response = downloadService.downloadFile("DF", null, "area_of_interest", "csv");
+
+		assertEquals(HttpStatus.OK, response.getStatusCode());
+		assertEquals("id,name\n1,pre-generated\n", new String(response.getBody()));
+		verify(geoServerWfsClient, never()).downloadCsv(anyString(), anyString(), anyString());
+		verify(geoServerWfsClient, never()).countFeatures(anyString(), anyString(), anyString());
+	}
+
+	@Test
+	void downloadFile_ShouldFallBackToTheWfsWhenTheFileIsNotPublishedYet() {
+		when(downloadConfigService.findEnabledTheme("area_of_interest")).thenReturn(java.util.Optional.of(areaTheme));
+		when(preGeneratedGeoFileService.fetch("DF", null, "area_of_interest", "csv"))
+				.thenReturn(java.util.Optional.empty());
+		when(downloadConfigService.resolveWfsBaseUrl()).thenReturn("http://localhost:22669/geoserver/dsp/wfs");
+		when(territoryFilterBuilder.buildCqlFilter(areaTheme, "DF", null))
+				.thenReturn("territory_level_3_id IN ('5300108')");
+		when(geoServerWfsClient.countFeatures(anyString(), eq("dsp:area-of-interest"), anyString()))
+				.thenReturn(1L);
+		when(geoServerWfsClient.downloadCsv(anyString(), eq("dsp:area-of-interest"), anyString()))
+				.thenReturn("id,name\n1,from-wfs\n".getBytes());
+		when(downloadFileNameBuilder.build("DF", null, "Area of interest", "csv"))
+				.thenReturn("area-of-interest_df.csv");
+
+		ResponseEntity<byte[]> response = downloadService.downloadFile("DF", null, "area_of_interest", "csv");
+
+		assertEquals("id,name\n1,from-wfs\n", new String(response.getBody()));
+	}
+
+	@Test
+	void downloadFile_ShouldReturnNotFoundForFormatsTheWfsCannotProduce() {
+		DownloadThemeConfig gpkgTheme = new DownloadThemeConfig(
+				"area_of_interest",
+				"Area of interest",
+				"dsp:area-of-interest",
+				List.of("csv", "gpkg"),
+				true,
+				new DownloadTerritoryFilterConfig("direct", "territory_level_3_id", null)
+		);
+		when(downloadConfigService.findEnabledTheme("area_of_interest")).thenReturn(java.util.Optional.of(gpkgTheme));
+		when(preGeneratedGeoFileService.fetch("DF", null, "area_of_interest", "gpkg"))
+				.thenReturn(java.util.Optional.empty());
+
+		ResponseStatusException exception = assertThrows(
+				ResponseStatusException.class,
+				() -> downloadService.downloadFile("DF", null, "area_of_interest", "gpkg")
+		);
+
+		assertEquals(HttpStatus.NOT_FOUND, exception.getStatusCode());
+		verify(geoServerWfsClient, never()).countFeatures(anyString(), anyString(), anyString());
+	}
+
+	@Test
+	void search_ShouldPreferTheLastUpdateOfThePublishedFile() {
+		DownloadSearchRequest request = new DownloadSearchRequest();
+		request.setLevel2("DF");
+
+		when(downloadConfigService.getEnabledThemes()).thenReturn(List.of(areaTheme));
+		when(downloadConfigService.resolveWfsBaseUrl()).thenReturn("http://localhost:22669/geoserver/dsp/wfs");
+		when(territoryFilterBuilder.buildCqlFilter(areaTheme, "DF", null))
+				.thenReturn("territory_level_3_id IN ('5300108')");
+		when(geoServerWfsClient.countFeatures(anyString(), eq("dsp:area-of-interest"), anyString()))
+				.thenReturn(2L);
+		when(preGeneratedGeoFileService.findLastUpdate("DF", null, "area_of_interest", "csv"))
+				.thenReturn(java.util.Optional.of("2026-03-04T10:00:00Z"));
+
+		List<DownloadItemResponse> items = downloadService.search(request);
+
+		assertEquals("2026-03-04T10:00:00Z", items.getFirst().lastUpdate());
+		verify(geoServerWfsClient, never()).fetchLatestAttributeValue(anyString(), anyString(), anyString());
 	}
 
 	@Test
