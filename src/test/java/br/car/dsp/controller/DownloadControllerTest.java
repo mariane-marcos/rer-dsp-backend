@@ -44,7 +44,7 @@ class DownloadControllerTest {
 		DownloadSearchRequest request = new DownloadSearchRequest();
 		request.setLevel2("DF");
 		List<DownloadItemResponse> items = List.of(
-				new DownloadItemResponse("theme_alpha", "Theme Alpha", List.of(), "2026-06-01")
+				new DownloadItemResponse("theme_alpha", "Theme Alpha", List.of(), "2026-06-01", null)
 		);
 		when(downloadService.search(request)).thenReturn(items);
 

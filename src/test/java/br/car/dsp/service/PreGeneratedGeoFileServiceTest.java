@@ -102,43 +102,54 @@ class PreGeneratedGeoFileServiceTest {
 	}
 
 	@Test
-	void findLastUpdate_ReadsTheUserMetadataWrittenByTheJob() {
+	void findGeneratedAt_ReadsTheUserMetadataWrittenByTheJob() {
+		givenKey();
+		when(s3Client.headObject(any(HeadObjectRequest.class))).thenReturn(
+				HeadObjectResponse.builder()
+						.metadata(Map.of("generated-at", "2026-03-04T10:00:00Z"))
+						.build());
+
+		assertEquals(
+				Optional.of("2026-03-04T10:00:00Z"),
+				service.findGeneratedAt("35", null, "area_of_interest", "csv"));
+	}
+
+	@Test
+	void findGeneratedAt_IsEmptyWhenTheFileCarriesNoDate() {
+		givenKey();
+		when(s3Client.headObject(any(HeadObjectRequest.class)))
+				.thenReturn(HeadObjectResponse.builder().metadata(Map.of()).build());
+
+		assertTrue(service.findGeneratedAt("35", null, "area_of_interest", "csv").isEmpty());
+	}
+
+	@Test
+	void findGeneratedAt_IgnoresLegacyLastUpdateMetadata() {
 		givenKey();
 		when(s3Client.headObject(any(HeadObjectRequest.class))).thenReturn(
 				HeadObjectResponse.builder()
 						.metadata(Map.of("last-update", "2026-03-04T10:00:00Z"))
 						.build());
 
-		assertEquals(
-				Optional.of("2026-03-04T10:00:00Z"),
-				service.findLastUpdate("35", null, "area_of_interest", "csv"));
+		assertTrue(service.findGeneratedAt("35", null, "area_of_interest", "csv").isEmpty());
 	}
 
 	@Test
-	void findLastUpdate_IsEmptyWhenTheFileCarriesNoDate() {
-		givenKey();
-		when(s3Client.headObject(any(HeadObjectRequest.class)))
-				.thenReturn(HeadObjectResponse.builder().metadata(Map.of()).build());
-
-		assertTrue(service.findLastUpdate("35", null, "area_of_interest", "csv").isEmpty());
-	}
-
-	@Test
-	void findLastUpdate_TreatsA404AsMissingBecauseSomeEndpointsDoNotTypeIt() {
+	void findGeneratedAt_TreatsA404AsMissingBecauseSomeEndpointsDoNotTypeIt() {
 		givenKey();
 		when(s3Client.headObject(any(HeadObjectRequest.class)))
 				.thenThrow((S3Exception) S3Exception.builder().statusCode(404).build());
 
-		assertTrue(service.findLastUpdate("35", null, "area_of_interest", "csv").isEmpty());
+		assertTrue(service.findGeneratedAt("35", null, "area_of_interest", "csv").isEmpty());
 	}
 
 	@Test
-	void findLastUpdate_IsEmptyWhenTheStorageFails() {
+	void findGeneratedAt_IsEmptyWhenTheStorageFails() {
 		givenKey();
 		when(s3Client.headObject(any(HeadObjectRequest.class)))
 				.thenThrow((S3Exception) S3Exception.builder().statusCode(500).build());
 
-		assertTrue(service.findLastUpdate("35", null, "area_of_interest", "csv").isEmpty());
+		assertTrue(service.findGeneratedAt("35", null, "area_of_interest", "csv").isEmpty());
 	}
 
 	private void givenKey() {

@@ -57,6 +57,10 @@ class DownloadServiceTest {
 
 	@BeforeEach
 	void setUp() {
+		lenient().when(preGeneratedGeoFileService.fetch(anyString(), any(), anyString(), anyString()))
+				.thenReturn(java.util.Optional.empty());
+		lenient().when(preGeneratedGeoFileService.findGeneratedAt(anyString(), any(), anyString(), anyString()))
+				.thenReturn(java.util.Optional.empty());
 		areaTheme = new DownloadThemeConfig(
 				"area_of_interest",
 				"Area of interest",
@@ -117,6 +121,7 @@ class DownloadServiceTest {
 		assertEquals(1, items.size());
 		assertEquals("area_of_interest", items.getFirst().themeCode());
 		assertEquals("2024-06-15T10:30:00Z", items.getFirst().lastUpdate());
+		assertNull(items.getFirst().lastFileGenerated());
 		assertTrue(items.getFirst().formats().stream().anyMatch(format ->
 				"csv".equals(format.format()) && DownloadFormatStatus.AVAILABLE.equals(format.status())));
 		verify(territoryFilterBuilder).validateTerritory("DF", null);
@@ -138,6 +143,7 @@ class DownloadServiceTest {
 
 		assertEquals(1, items.size());
 		assertNull(items.getFirst().lastUpdate());
+		assertNull(items.getFirst().lastFileGenerated());
 		verify(geoServerWfsClient, never()).fetchLatestAttributeValue(anyString(), anyString(), anyString());
 	}
 
@@ -282,7 +288,7 @@ class DownloadServiceTest {
 	}
 
 	@Test
-	void search_ShouldPreferTheLastUpdateOfThePublishedFile() {
+	void search_ShouldKeepLastUpdateFromTheWfsEvenWhenAFileIsPublished() {
 		DownloadSearchRequest request = new DownloadSearchRequest();
 		request.setLevel2("DF");
 
@@ -292,13 +298,38 @@ class DownloadServiceTest {
 				.thenReturn("territory_level_3_id IN ('5300108')");
 		when(geoServerWfsClient.countFeatures(anyString(), eq("dsp:area-of-interest"), anyString()))
 				.thenReturn(2L);
-		when(preGeneratedGeoFileService.findLastUpdate("DF", null, "area_of_interest", "csv"))
+		when(geoServerWfsClient.fetchLatestAttributeValue(anyString(), eq("dsp:area-of-interest"), anyString()))
+				.thenReturn(java.util.Optional.of("2026-09-01T12:00:00Z"));
+		when(preGeneratedGeoFileService.findGeneratedAt("DF", null, "area_of_interest", "csv"))
 				.thenReturn(java.util.Optional.of("2026-03-04T10:00:00Z"));
 
 		List<DownloadItemResponse> items = downloadService.search(request);
 
-		assertEquals("2026-03-04T10:00:00Z", items.getFirst().lastUpdate());
-		verify(geoServerWfsClient, never()).fetchLatestAttributeValue(anyString(), anyString(), anyString());
+		assertEquals("2026-09-01T12:00:00Z", items.getFirst().lastUpdate());
+		assertEquals("2026-03-04T10:00:00Z", items.getFirst().lastFileGenerated());
+		verify(geoServerWfsClient).fetchLatestAttributeValue(anyString(), eq("dsp:area-of-interest"), anyString());
+	}
+
+	@Test
+	void search_ShouldLeaveLastFileGeneratedEmptyWhenTheObjectIsMissing() {
+		DownloadSearchRequest request = new DownloadSearchRequest();
+		request.setLevel2("DF");
+
+		when(downloadConfigService.getEnabledThemes()).thenReturn(List.of(areaTheme));
+		when(downloadConfigService.resolveWfsBaseUrl()).thenReturn("http://localhost:22669/geoserver/dsp/wfs");
+		when(territoryFilterBuilder.buildCqlFilter(areaTheme, "DF", null))
+				.thenReturn("territory_level_3_id IN ('5300108')");
+		when(geoServerWfsClient.countFeatures(anyString(), eq("dsp:area-of-interest"), anyString()))
+				.thenReturn(2L);
+		when(geoServerWfsClient.fetchLatestAttributeValue(anyString(), eq("dsp:area-of-interest"), anyString()))
+				.thenReturn(java.util.Optional.of("2026-09-01T12:00:00Z"));
+		when(preGeneratedGeoFileService.findGeneratedAt("DF", null, "area_of_interest", "csv"))
+				.thenReturn(java.util.Optional.empty());
+
+		List<DownloadItemResponse> items = downloadService.search(request);
+
+		assertEquals("2026-09-01T12:00:00Z", items.getFirst().lastUpdate());
+		assertNull(items.getFirst().lastFileGenerated());
 	}
 
 	@Test

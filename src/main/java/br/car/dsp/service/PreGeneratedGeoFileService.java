@@ -27,8 +27,8 @@ import software.amazon.awssdk.services.s3.model.S3Exception;
 @RequiredArgsConstructor
 public class PreGeneratedGeoFileService {
 
-	/** User-metadata written by the job with the timestamp of the newest feature. */
-	private static final String LAST_UPDATE_METADATA = "last-update";
+	/** User-metadata written by the job with the PutObject instant. */
+	private static final String GENERATED_AT_METADATA = "generated-at";
 
 	private final ObjectStorageClientProvider clientProvider;
 	private final ObjectStorageProperties properties;
@@ -53,9 +53,9 @@ public class PreGeneratedGeoFileService {
 	}
 
 	/**
-	 * @return the {@code last-update} metadata of the published file, when there is one.
+	 * @return the {@code generated-at} metadata of the published file, when there is one.
 	 */
-	public Optional<String> findLastUpdate(String level2Id, String level3Id, String themeCode,
+	public Optional<String> findGeneratedAt(String level2Id, String level3Id, String themeCode,
 			String format) {
 		return withKey(level2Id, level3Id, themeCode, format, (client, key) -> {
 			try {
@@ -63,7 +63,7 @@ public class PreGeneratedGeoFileService {
 						.bucket(properties.getBucket())
 						.key(key)
 						.build());
-				return Optional.ofNullable(response.metadata().get(LAST_UPDATE_METADATA))
+				return Optional.ofNullable(response.metadata().get(GENERATED_AT_METADATA))
 						.filter(value -> !value.isBlank());
 			} catch (NoSuchKeyException ex) {
 				return Optional.empty();
