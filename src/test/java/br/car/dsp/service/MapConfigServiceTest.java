@@ -21,6 +21,7 @@ class MapConfigServiceTest {
 		properties.setBaseMapsFile("classpath:baseMapConfig.json");
 
 		MapConfigService service = new MapConfigService(properties, new ObjectMapper());
+
 		JsonNode config = service.getBaseMaps();
 
 		assertTrue(config.has("baseMap"));
@@ -29,28 +30,25 @@ class MapConfigServiceTest {
 	}
 
 	@Test
-	void getLayers_ShouldLoadFromClasspathJson() {
-		MapConfigProperties properties = new MapConfigProperties();
-		properties.setLayersFile("classpath:mapLayersConfig.json");
-
-		MapConfigService service = new MapConfigService(properties, new ObjectMapper());
-		JsonNode config = service.getLayers();
-
-		assertTrue(config.has("hierarchy"));
-		assertTrue(config.get("hierarchy").isArray());
-		assertEquals("level1", config.get("hierarchy").get(0).get("key").asText());
-		assertTrue(config.has("screens"));
-		assertTrue(config.get("screens").has("home"));
-		assertEquals("AREA_OF_INTEREST", config.get("kpis").get("primaryCode").asText());
-	}
-
-	@Test
 	void getLayers_ShouldLoadFromFilesystemPath() throws Exception {
 		Path temp = Files.createTempFile("map-layers", ".json");
+
 		Files.writeString(
 				temp,
 				"""
-				{ "groups": [ { "name": "Custom", "key": "c", "layers": [] } ] }
+				{
+				  "hierarchy": [
+				    {
+				      "key": "level1"
+				    }
+				  ],
+				  "screens": {
+				    "home": {}
+				  },
+				  "kpis": {
+				    "primaryCode": "AREA_OF_INTEREST"
+				  }
+				}
 				"""
 		);
 
@@ -58,9 +56,18 @@ class MapConfigServiceTest {
 		properties.setLayersFile(temp.toAbsolutePath().toString());
 
 		MapConfigService service = new MapConfigService(properties, new ObjectMapper());
+
 		JsonNode config = service.getLayers();
 
-		assertEquals("c", config.get("groups").get(0).get("key").asText());
+		assertTrue(config.has("hierarchy"));
+		assertTrue(config.get("hierarchy").isArray());
+		assertEquals("level1", config.get("hierarchy").get(0).get("key").asText());
+
+		assertTrue(config.has("screens"));
+		assertTrue(config.get("screens").has("home"));
+
+		assertTrue(config.has("kpis"));
+		assertEquals("AREA_OF_INTEREST", config.get("kpis").get("primaryCode").asText());
 	}
 
 	@Test
@@ -71,5 +78,15 @@ class MapConfigServiceTest {
 		MapConfigService service = new MapConfigService(properties, new ObjectMapper());
 
 		assertThrows(ResponseStatusException.class, service::getBaseMaps);
+	}
+
+	@Test
+	void getLayers_ShouldFailWhenFileMissing() {
+		MapConfigProperties properties = new MapConfigProperties();
+		properties.setLayersFile("file:/does-not-exist/mapLayersConfig.json");
+
+		MapConfigService service = new MapConfigService(properties, new ObjectMapper());
+
+		assertThrows(ResponseStatusException.class, service::getLayers);
 	}
 }
