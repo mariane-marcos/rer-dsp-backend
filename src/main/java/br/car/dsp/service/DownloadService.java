@@ -14,7 +14,10 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -22,9 +25,13 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
 import org.springframework.web.server.ResponseStatusException;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class DownloadService {
+
+	/** Formats the WFS can produce, and therefore the only ones with a fallback. */
+	private static final Set<String> WFS_BACKED_FORMATS = Set.of("csv");
 
 	private final DownloadConfigService downloadConfigService;
 	private final DownloadTerritoryFilterBuilder territoryFilterBuilder;
@@ -32,6 +39,7 @@ public class DownloadService {
 	private final DownloadFileNameBuilder downloadFileNameBuilder;
 	private final AreaOfInterestRepository areaOfInterestRepository;
 	private final FeaturesBundleZipBuilder featuresBundleZipBuilder;
+	private final PreGeneratedGeoFileService preGeneratedGeoFileService;
 
 	public List<DownloadThemeResponse> getThemes() {
 		return downloadConfigService.getEnabledThemes().stream()
@@ -82,11 +90,16 @@ public class DownloadService {
 						cqlFilter
 				).orElse(null);
 			}
+			String lastFileGenerated = firstFormat(theme)
+					.flatMap(format -> preGeneratedGeoFileService.findGeneratedAt(
+							level2, level3, theme.code(), format))
+					.orElse(null);
 			items.add(new DownloadItemResponse(
 					theme.code(),
 					theme.name(),
 					formats,
-					lastUpdate
+					lastUpdate,
+					lastFileGenerated
 			));
 		}
 		return items;
@@ -111,27 +124,41 @@ public class DownloadService {
 			throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Format not supported for the theme");
 		}
 
-		String cqlFilter = territoryFilterBuilder.buildCqlFilter(
-				themeConfig,
-				level2.trim(),
-				normalizedLevel3
+		String normalizedLevel2 = level2.trim();
+
+		// S3-first: the file was already generated from the same base the WFS reads, so serving
+		// it skips the heavy query. Only the formats the WFS can produce have a fallback.
+		Optional<byte[]> preGenerated = preGeneratedGeoFileService.fetch(
+				normalizedLevel2,
+				normalizedLevel3,
+				themeConfig.code(),
+				normalizedFormat
 		);
-		long matched = geoServerWfsClient.countFeatures(
-				downloadConfigService.resolveWfsBaseUrl(),
-				themeConfig.typeName(),
-				cqlFilter
-		);
-		if (matched <= 0) {
-			throw new ResponseStatusException(HttpStatus.NOT_FOUND, "File unavailable for download");
+		byte[] content;
+		if (preGenerated.isPresent()) {
+			content = preGenerated.get();
+			log.info(
+					"Download served from S3 | level2={} level3={} theme={} format={} bytes={}",
+					normalizedLevel2,
+					normalizedLevel3,
+					themeConfig.code(),
+					normalizedFormat,
+					content.length
+			);
+		} else {
+			content = downloadFromWfs(themeConfig, normalizedLevel2, normalizedLevel3, normalizedFormat);
+			log.info(
+					"Download served from WFS | level2={} level3={} theme={} format={} bytes={}",
+					normalizedLevel2,
+					normalizedLevel3,
+					themeConfig.code(),
+					normalizedFormat,
+					content.length
+			);
 		}
 
-		byte[] content = geoServerWfsClient.downloadCsv(
-				downloadConfigService.resolveWfsBaseUrl(),
-				themeConfig.typeName(),
-				cqlFilter
-		);
 		String fileName = downloadFileNameBuilder.build(
-				level2.trim(),
+				normalizedLevel2,
 				normalizedLevel3,
 				themeConfig.name(),
 				normalizedFormat
@@ -143,6 +170,40 @@ public class DownloadService {
 		headers.setContentLength(content.length);
 
 		return new ResponseEntity<>(content, headers, HttpStatus.OK);
+	}
+
+	/**
+	 * Fallback for what the object storage does not have. Only {@code csv} exists in the WFS:
+	 * any other format is served exclusively from the pre-generated file, so its absence is a
+	 * "not ready yet", not a broken request.
+	 */
+	private byte[] downloadFromWfs(DownloadThemeConfig themeConfig, String level2, String level3,
+			String format) {
+		if (!WFS_BACKED_FORMATS.contains(format)) {
+			throw new ResponseStatusException(HttpStatus.NOT_FOUND, "File unavailable for download");
+		}
+
+		String wfsBaseUrl = downloadConfigService.resolveWfsBaseUrl();
+		String cqlFilter = territoryFilterBuilder.buildCqlFilter(themeConfig, level2, level3);
+		long matched = geoServerWfsClient.countFeatures(wfsBaseUrl, themeConfig.typeName(), cqlFilter);
+		if (matched <= 0) {
+			throw new ResponseStatusException(HttpStatus.NOT_FOUND, "File unavailable for download");
+		}
+		return geoServerWfsClient.downloadCsv(wfsBaseUrl, themeConfig.typeName(), cqlFilter);
+	}
+
+	/**
+	 * First format of the theme: enough to HeadObject the published file for {@code lastFileGenerated}.
+	 *
+	 * <p>{@code rer-dsp-job-geo-file-generation} publishes every format of a theme/territory in the
+	 * same run, so their {@code generated-at} metadata is always the same — checking one format is
+	 * equivalent to checking all of them, without the extra HeadObject calls.
+	 */
+	private static Optional<String> firstFormat(DownloadThemeConfig theme) {
+		List<String> formats = theme.formats();
+		return formats == null || formats.isEmpty()
+				? Optional.empty()
+				: Optional.of(formats.getFirst());
 	}
 
 	public ResponseEntity<byte[]> downloadFeaturesBundle(String aoiId) {
